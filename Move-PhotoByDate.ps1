@@ -1,37 +1,40 @@
-﻿#requires -version 4
+﻿#requires -version 5
 <#
 .SYNOPSIS
-  Script to organize and move photos into directories by date.
+  This script organizes photos by date, moving them into folders structured by year and month.
 .DESCRIPTION
-  This PowerShell script organizes photos by their date of capture. It moves each photo into a folder structure based on the year and month of the photo's creation date. If the capture date is unavailable, the script uses the file's last write time.
-.PARAMETER PicturePath
+  The script scans a directory for photo files, retrieves their date of capture (or last write time if the capture date is unavailable), and moves the files into a folder structure based on year and month. It can also remove empty folders after sorting.
+.PARAMETER SourcePath
   The path to the folder containing the photos to be organized.
 .PARAMETER TargetPath
-  The path to the folder where the photos should be moved. The script will create subfolders for each year and month.
+  The path to the folder where the photos will be moved and organized by date.
 .INPUTS
-  String paths for PicturePath and TargetPath.
+  Strings for SourcePath and TargetPath.
+.OUTPUTS
+  None. Moves files and organizes them into directories.
 .NOTES
   Version:        1.0
   Author:         MrManjah
   Creation Date:  14/10/2024
   Purpose/Change: Initial script development
 .EXAMPLE
-  Move-Pictures -PicturePath "\\DiskStation\Photo\Amélie a trier" -TargetPath "\\DiskStation\Photo\"
+  Move-Pictures -SourcePath "\\nas\Photos\john a trier" -TargetPath "\\nas\Photos\"
   
-  This example moves photos from the source folder to the target folder, organizing them by year and month.
+  This command moves photos from the source folder to the target folder, organizing them by year and month.
 #>
 
 #---------------------------------------------------------[Script Parameters]------------------------------------------------------
 
 Param (
-  [String]
-  # Path to the folder containing photos to be organized
-  $PicturePath = "",
+  [Parameter(Mandatory = $true,
+    HelpMessage = "Path to the folder containing photos to be organized. Ex: \\nas\SourcePath\")]
+  [String]$SourcePath,
   
-  [String]
-  # Target folder where photos should be moved
-  $TargetPath = ""
+  [Parameter(Mandatory = $true,
+    HelpMessage = "Target folder where photos should be moved. Ex: \\nas\TargetPath\")]
+  [String]$TargetPath
 )
+
 
 #---------------------------------------------------------[Initialisations]--------------------------------------------------------
 
@@ -39,121 +42,143 @@ Param (
 $ErrorActionPreference = 'SilentlyContinue'
 
 # Import Modules & Snap-ins
-Import-Module PSLogging
+# Example: Import-Module PSLogging (if needed)
 
 #----------------------------------------------------------[Declarations]----------------------------------------------------------
 
-# Script Version
-$ScriptVersion = '1.0'
+# Global declarations, if any, go here (e.g., version, counters)
 
-#---------------------------------------------------------[Functions and Logic]----------------------------------------------------
+#-----------------------------------------------------------[Functions]------------------------------------------------------------
 
-# Function to get the date a photo was taken
-function Get-DateTaken {
-  param (
-    [Parameter(ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
-    [Alias('FullName')]
-    [String]
-    $Path
-  )
-    
-  begin {
-    $shell = New-Object -COMObject Shell.Application
+Function Get-DateTaken {
+  Param ([String]$Path)
+  Begin {
+    Write-Host 'Retrieving DateTaken metadata...'
   }
-    
-  process {
-    $returnvalue = [PSCustomObject]@{
-      Name          = Split-Path $Path -Leaf
-      Folder        = Split-Path $Path
-      DateTaken     = $null
-      LastWriteTime = (Get-Item $Path).LastWriteTime
+  Process {
+    Try {
+      $shell = New-Object -COMObject Shell.Application
+      $returnvalue = [PSCustomObject]@{
+        Name          = Split-Path $Path -Leaf
+        Folder        = Split-Path $Path
+        DateTaken     = $null
+        LastWriteTime = (Get-Item $Path).LastWriteTime
+      }
+      $shellfolder = $shell.Namespace($returnvalue.Folder)
+      if ($shellfolder) {
+        $shellfile = $shellfolder.ParseName($returnvalue.Name)
+        if ($shellfile) {
+          $returnvalue.DateTaken = $shellfolder.GetDetailsOf($shellfile, 12)
+        }
+      }
+      return $returnvalue
     }
-        
-    $shellfolder = $shell.Namespace($returnvalue.Folder)
-    if ($shellfolder) {
-      $shellfile = $shellfolder.ParseName($returnvalue.Name)
-      if ($shellfile) {
-        $returnvalue.DateTaken = $shellfolder.GetDetailsOf($shellfile, 12)
+    Catch {
+      Write-Host -BackgroundColor Red "Error retrieving DateTaken for $($Path): $($_.Exception.Message)"
+      Break
+    }
+  }
+  End {
+    If ($?) {
+      Write-Host 'DateTaken retrieved successfully.'
+    }
+  }
+}
+
+Function Move-Pictures {
+  Param ([String]$SourcePath, [String]$TargetPath)
+  Begin {
+    Write-Host 'Starting to move pictures...'
+  }
+  Process {
+    Try {
+      $files = Get-ChildItem -Path $SourcePath -Recurse -File
+      $i = 0
+
+      foreach ($file in $files) {
+        $DateTaken = Get-DateTaken -Path $file.FullName
+
+        if ($DateTaken.DateTaken) {
+          $date = Get-Date -Date ($DateTaken.DateTaken -replace "[^0-9/\:\s]")
+        }
+        else {
+          $date = $file.LastWriteTime
+        }
+
+        $year = $date.ToString("yyyy")
+        $month = $date.ToString("MMMM", (Get-Culture).DateTimeFormat)
+        $day = $date.ToString("dd")
+
+        Write-Host "Processing $($file.Name) - Date: $($day) $($month) $($year)" -ForegroundColor Yellow
+
+        $Directory = Join-Path -Path $TargetPath -ChildPath "$($year)\$($month)"
+
+        if (!(Test-Path $Directory)) {
+          New-Item -Path $Directory -ItemType Directory | Out-Null
+          Write-Host "Creating folder $($Directory)" -ForegroundColor Green
+        }
+
+        if ($file.DirectoryName -ne $Directory) {
+          Move-Item -Path $file.FullName -Destination $Directory
+          Write-Host "Moving $($file.Name) to $($Directory)" -ForegroundColor Yellow
+        }
+        else {
+          Write-Host "$($file.Name) is already in the correct folder." -ForegroundColor Green
+        }
+
+        $i++
+        Write-Progress -Activity "Organizing photos" -Status "Progress: $i of $($files.Count)" -PercentComplete (($i / $files.Count) * 100)
       }
     }
-
-    $returnvalue
+    Catch {
+      Write-Host -BackgroundColor Red "Error while moving pictures: $($_.Exception.Message)"
+      Break
+    }
+  }
+  End {
+    If ($?) {
+      Write-Host 'All pictures moved successfully.'
+    }
   }
 }
 
-# Function to move pictures based on their date
-function Move-Pictures {
-  param (
-    [String]
-    $PicturePath,
-    [String]
-    $TargetPath
-  )
+Function Remove-EmptyFolders {
+  Param ([String]$Path)
+  Begin {
+    Write-Host 'Starting to remove empty folders...'
+  }
+  Process {
+    Try {
+      $folders = Get-ChildItem -Path $Path -Recurse -Directory
 
-  $files = Get-ChildItem -Path $PicturePath -Recurse -File -ErrorAction SilentlyContinue
-  $i = 0
-
-  foreach ($file in $files) {
-    $DateTaken = $file | Get-DateTaken
-
-    if ($DateTaken.DateTaken) {
-      $date = Get-Date -Date ($DateTaken.DateTaken -replace "[^0-9/\:\s]")
+      foreach ($folder in $folders) {
+        if (-not (Get-ChildItem -Path $folder.FullName)) {
+          Write-Host "Removing empty folder: $($folder.FullName)" -ForegroundColor Red
+          Remove-Item -Path $folder.FullName -Force
+        }
+      }
     }
-    else {
-      $date = $file.LastWriteTime
+    Catch {
+      Write-Host -BackgroundColor Red "Error while removing folders: $($_.Exception.Message)"
+      Break
     }
-
-    $year = $date.ToString("yyyy")
-    $month = $date.ToString("MMMM", (Get-Culture).DateTimeFormat)
-    $day = $date.ToString("dd")
-
-    Write-Host "Processing $($file.Name) - Date: $($day) $($month) $($year)" -ForegroundColor Yellow
-
-    $Directory = Join-Path -Path $TargetPath -ChildPath "$year\$month"
-
-    if (!(Test-Path $Directory)) {
-      New-Item -Path $Directory -ItemType Directory | Out-Null
-      Write-Host "Creating folder $($Directory)" -ForegroundColor Green
+  }
+  End {
+    If ($?) {
+      Write-Host 'Empty folders removed successfully.'
     }
-
-    if ($file.DirectoryName -ne $Directory) {
-      Move-Item -Path $file.FullName -Destination $Directory
-      Write-Host "Moving $($file.Name) to $($Directory)" -ForegroundColor Yellow
-    }
-    else {
-      Write-Host "$($file.Name) is already in the correct folder." -ForegroundColor Green
-    }
-
-    $i++
-    Write-Progress -Activity "Organizing photos" -Status "Progress: $i of $($files.Count)" -PercentComplete (($i / $files.Count) * 100)
   }
 }
 
-# Function to remove empty folders
-function Remove-EmptyFolders {
-  param (
-    [String]
-    $Path
-  )
-
-  $folders = Get-ChildItem -Path $Path -Recurse -Directory
-
-  foreach ($folder in $folders) {
-    if (-not (Get-ChildItem -Path $folder.FullName)) {
-      Write-Host "Removing empty folder: $($folder.FullName)" -ForegroundColor Red
-      Remove-Item -Path $folder.FullName -Force
-    }
-  }
-}
+#-----------------------------------------------------------[Execution]------------------------------------------------------------
 
 # Main execution block
 try {
-  Move-Pictures -PicturePath $PicturePath -TargetPath $TargetPath
-
+  Move-Pictures -SourcePath $SourcePath -TargetPath $TargetPath
   # Uncomment to remove empty folders
-  # Remove-EmptyFolders -Path $PicturePath
+  # Remove-EmptyFolders -Path $SourcePath
   # Remove-EmptyFolders -Path $TargetPath
 }
 catch {
-  Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host -BackgroundColor Red "Error during execution: $($_.Exception.Message)"
 }
